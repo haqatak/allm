@@ -45,8 +45,24 @@ class MyLlamaAttention(LlamaAttention):
 			cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 			key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-		#===		
-		attn_output = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"], q_block_size=32768, k_block_size=(1024 if input_shape[1] > 128 else 1000000)).transpose(1, 2)
+		#===
+		if hidden_states.device.type == 'mps':
+			import mlx.core as mx
+			import numpy as np
+			from mlx_flash_attention.attention import flash_attention as mlx_flash_attention
+			q = query_states.transpose(1, 2)
+			k = key_states.transpose(1, 2)
+			v = value_states.transpose(1, 2)
+
+			q_mx = mx.array(q.cpu().numpy())
+			k_mx = mx.array(k.cpu().numpy())
+			v_mx = mx.array(v.cpu().numpy())
+
+			attn_output_mx = mlx_flash_attention(q_mx, k_mx, v_mx)
+			attn_output_np = np.array(attn_output_mx)
+			attn_output = torch.from_numpy(attn_output_np).to(hidden_states.device)
+		else:
+			attn_output = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"], q_block_size=32768, k_block_size=(1024 if input_shape[1] > 128 else 1000000)).transpose(1, 2)
 		attn_weights = None
 		"""
 		attention_interface: Callable = eager_attention_forward
@@ -216,7 +232,7 @@ class MyLlamaModel(LlamaModel):
 
 # Monkey-patch
 import transformers.models.llama.modeling_llama as llama_modeling
-#llama_modeling.LlamaAttention = MyLlamaAttention #replaced to stable attn_implementation="flash_attention_2"
+llama_modeling.LlamaAttention = MyLlamaAttention #replaced to stable attn_implementation="flash_attention_2"
 llama_modeling.LlamaMLP = MyLlamaMLP
 llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
 llama_modeling.LlamaModel = MyLlamaModel

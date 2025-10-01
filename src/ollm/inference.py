@@ -70,19 +70,19 @@ class Inference:
 		print("loading model from", model_dir)
 		if self.model_id=="qwen3-next-80B":
 			from . import qwen3_next
-			qwen3_next.loader = MoEWeightsLoader2(model_dir)
+			qwen3_next.loader = MoEWeightsLoader2(model_dir, device=self.device)
 			qwen3_next.stats = self.stats
-			self.model = qwen3_next.MyQwen3NextForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+			self.model = qwen3_next.MyQwen3NextForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 		elif self.model_id=="gpt-oss-20B":
 			from . import gpt_oss
-			gpt_oss.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
+			gpt_oss.loader = GDSWeights(os.path.join(model_dir, "gds_export"), device=self.device)
 			gpt_oss.stats = self.stats
 			self.model = gpt_oss.MyGptOssForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 		else:
 			from . import llama
-			llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
+			llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"), device=self.device)
 			llama.stats = self.stats			
-			self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+			self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 			self.model.clean_layers_weights()
 
 		self.model.eval()
