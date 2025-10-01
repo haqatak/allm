@@ -14,7 +14,80 @@ from .kvcache import oCache
 loader, stats = None, None
 
 #======== rewriting core classes ==============
-from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, Qwen3NextRMSNorm, create_causal_mask, repeat_kv, MoeModelOutputWithPast, MoeCausalLMOutputWithPast, TransformersKwargs, Cache
+from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextAttention, Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, Qwen3NextRMSNorm, create_causal_mask, repeat_kv, MoeModelOutputWithPast, MoeCausalLMOutputWithPast, TransformersKwargs, Cache, apply_rotary_pos_emb
+
+class MyQwen3NextAttention(Qwen3NextAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        if hidden_states.device.type == 'mps':
+            import mlx.core as mx
+            import numpy as np
+            from mlx_flash_attention.attention import flash_attention as mlx_flash_attention
+            key_states_rep = repeat_kv(key_states, self.num_key_value_groups)
+            value_states_rep = repeat_kv(value_states, self.num_key_value_groups)
+
+            q = query_states.transpose(1, 2)
+            k = key_states_rep.transpose(1, 2)
+            v = value_states_rep.transpose(1, 2)
+
+            q_mx = mx.array(q.cpu().numpy())
+            k_mx = mx.array(k.cpu().numpy())
+            v_mx = mx.array(v.cpu().numpy())
+
+            attn_output_mx = mlx_flash_attention(q_mx, k_mx, v_mx)
+            attn_output_np = np.array(attn_output_mx)
+            attn_output = torch.from_numpy(attn_output_np).to(hidden_states.device)
+            attn_output = attn_output.transpose(1, 2)
+        else:
+            # This is the original implementation from HuggingFace Transformers
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_values
+
 
 class Qwen3NextDiskCache(Qwen3NextDynamicCache, oCache):
 	def __init__(self, config, cache_dir="./kv_cache", stats=None):
@@ -308,6 +381,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 
 
 import transformers.models.qwen3_next.modeling_qwen3_next as modeling
+modeling.Qwen3NextAttention = MyQwen3NextAttention
 modeling.Qwen3NextMLP = MyQwen3NextMLP
 modeling.Qwen3NextSparseMoeBlock = MyQwen3NextSparseMoeBlock
 modeling.Qwen3NextModel = MyQwen3NextModel

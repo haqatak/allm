@@ -1,20 +1,35 @@
 import json, os, time, math, re
 import torch
 from torch.utils.dlpack import from_dlpack
-import cupy as cp
-import kvikio
+try:
+    import cupy as cp
+    import kvikio
+except ImportError:
+    cp = None
+    kvikio = None
 #from safetensors.torch import safe_open, load_file
 import struct
 
 stats = None
 
-DTYPE_MAP = {
-	"float16": cp.float16,
-	"bfloat16": cp.float16, #cp.dtype('bfloat16'),
-	"float32": cp.float32,
-	"float64": cp.float64,
-	"int8": cp.int8,
-	"int32": cp.int32,
+DTYPE_MAP = None
+if cp:
+    DTYPE_MAP = {
+        "float16": cp.float16,
+        "bfloat16": cp.float16, #cp.dtype('bfloat16'),
+        "float32": cp.float32,
+        "float64": cp.float64,
+        "int8": cp.int8,
+        "int32": cp.int32,
+    }
+
+TORCH_DTYPE_MAP = {
+	"float16": torch.float16,
+	"bfloat16": torch.bfloat16,
+	"float32": torch.float32,
+	"float64": torch.float64,
+	"int8": torch.int8,
+	"int32": torch.int32,
 }
 
 class GDSWeights:
@@ -40,27 +55,37 @@ class GDSWeights:
 			return self.load_from_disk_to_cuda(path, shape, dtype)
 
 	def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
-		cp_dtype = DTYPE_MAP[dtype]
-		n_elems = 1
-		for s in shape:
-			n_elems *= s
-		nbytes = n_elems * cp.dtype(cp_dtype).itemsize
+		if kvikio and cp and self.device.type == 'cuda':
+			cp_dtype = DTYPE_MAP[dtype]
+			n_elems = 1
+			for s in shape:
+				n_elems *= s
+			nbytes = n_elems * cp.dtype(cp_dtype).itemsize
 
-		# Allocate on GPU
-		with cp.cuda.Device(0):
-			buf = cp.empty(n_elems, dtype=cp_dtype)
+			# Allocate on GPU
+			with cp.cuda.Device(0):
+				buf = cp.empty(n_elems, dtype=cp_dtype)
 
-		# DMA read directly into GPU buffer
-		with kvikio.CuFile(path, "r") as f:
-			# Read raw bytes straight into GPU memory
-			n = f.read(buf)
-			if n != nbytes:
-				raise IOError(f"Short read: {n} of {nbytes} bytes from {path}")
+			# DMA read directly into GPU buffer
+			with kvikio.CuFile(path, "r") as f:
+				# Read raw bytes straight into GPU memory
+				n = f.read(buf)
+				if n != nbytes:
+					raise IOError(f"Short read: {n} of {nbytes} bytes from {path}")
 
-		# Reshape and hand to torch via DLPack
-		buf = buf.reshape(shape)
-		t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
-		return t    
+			# Reshape and hand to torch via DLPack
+			buf = buf.reshape(shape)
+			t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
+			return t
+		else:
+			return self.load_from_disk_to_cpu(path, shape, dtype).to(self.device)
+
+	def load_from_disk_to_cpu(self, path, shape, dtype):
+		torch_dtype = TORCH_DTYPE_MAP[dtype]
+		with open(path, 'rb') as f:
+			buffer = f.read()
+		tensor = torch.frombuffer(buffer, dtype=torch_dtype).reshape(shape)
+		return tensor
 
 	def has(self, name: str) -> bool:
 		return name in self.manifest
@@ -80,7 +105,7 @@ class GDSWeights:
 		if packed=="mxfp4" or dtype.startswith("torch"):
 			tensor = torch.load(path, map_location="cpu")
 		else: #kvikio, numpy
-			tensor = self.load_from_disk_to_cuda(path, shape, dtype).cpu() #should be without GPU
+			tensor = self.load_from_disk_to_cpu(path, shape, dtype)
 		self.offloaded_map[name] = {"shape":shape, "dtype":dtype, "packed":packed, "tensor":tensor}
 
 	def get_offloaded_from_cpu_to_cuda(self, name):

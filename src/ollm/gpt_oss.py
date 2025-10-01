@@ -216,17 +216,33 @@ def my_eager_attention_forward(
 	# Flash-attention
 	offset, n_ctx = min(key.shape[2] - query.shape[2], sliding_window if sliding_window else 999), query.shape[2]
 	if offset==0: #use FA only for first generation
-		#print("offset", query.shape, key.shape, offset, "n_ctx:", n_ctx, "sliding_window:", sliding_window, "scaling:", scaling, kwargs)
-		start_q = torch.LongTensor([offset]).to(query.device)
-		t = flash_attention(
-			query,
-			key_states,
-			value_states,
-			s_aux, #sinks,
-			scaling,
-			sliding_window,
-			start_q
-		)
+		if query.device.type == 'mps':
+			import mlx.core as mx
+			import numpy as np
+			from mlx_flash_attention.attention import flash_attention as mlx_flash_attention
+			q_transposed = query.transpose(1, 2)
+			k_transposed = key_states.transpose(1, 2)
+			v_transposed = value_states.transpose(1, 2)
+
+			q_mx = mx.array(q_transposed.cpu().numpy())
+			k_mx = mx.array(k_transposed.cpu().numpy())
+			v_mx = mx.array(v_transposed.cpu().numpy())
+
+			attn_output_mx = mlx_flash_attention(q_mx, k_mx, v_mx)
+			attn_output_np = np.array(attn_output_mx)
+			t = torch.from_numpy(attn_output_np).to(query.device).transpose(1, 2)
+		else:
+			#print("offset", query.shape, key.shape, offset, "n_ctx:", n_ctx, "sliding_window:", sliding_window, "scaling:", scaling, kwargs)
+			start_q = torch.LongTensor([offset]).to(query.device)
+			t = flash_attention(
+				query,
+				key_states,
+				value_states,
+				s_aux, #sinks,
+				scaling,
+				sliding_window,
+				start_q
+			)
 		attn_output, attn_weights = t, None
 	
 	else: #standard attention (default)

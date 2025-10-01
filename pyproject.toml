@@ -17,7 +17,9 @@ dependencies = [
     "torch>2.6.0", #tested: 2.8.0
     "transformers>=4.55.0", #tested: 4.55.4, 4.56.1
     "accelerate",
-    "flash-attn" #tested: 2.7.4.post1
+    "numpy",
+    "mlx",
+    "mlx-flash-attention @ git+https://github.com/haqatak/flashy-attention.git"
 ]
 
 [project.urls]
